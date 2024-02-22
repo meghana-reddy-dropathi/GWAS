@@ -1,0 +1,78 @@
+# Replace with my own user id
+cd /scratch/dropathi.m
+
+mkdir training_gwas
+
+# get on a compute node
+srun --pty /bin/bash
+
+# load a conda module
+
+module load anaconda3/2022.05
+
+# create our environment
+conda create --prefix=/scratch/<username>/training_gwas/gemma_env
+
+# activate it
+conda activate /scratch/<username>/training_gwas/gemma_env
+
+#note in order to get that preceeding command to work you may need to run `conda init` first
+
+#we need to add the bioconda channel to find and install the packages
+
+conda config --add channels bioconda
+
+# install gemma and two other packages plink, beagle, and bcftools
+conda install gemma plink bcftools openssl=1.0
+gemma -h 
+# get the data
+wget https://github.com/northeastern-rc/training_GEMMA/raw/main/rcbootcamp_gemmagwas.tar.gz
+
+# untar the data
+tar -xzvf rcbootcamp_gemmagwas.tar.gz
+
+#check that the data is in training_gwas
+
+cd training_gwas
+
+ls
+# imputing data
+paste <(bcftools query -f '[%SAMPLE\t]\n' 5.n190_moreSNPS_gwas_thinned.recode.vcf | head -1 | tr '\t' '\n') <(bcftools query -f '[%GT\t]\n' 5.n190_moreSNPS_gwas_thinned.recode.vcf | awk -v OFS="\t" '{for (i=1;i<=NF;i++) if ($i == "./.") sum[i]+=1 } END {for (i in sum) print i, sum[i] / NR }' | sort -k1,1n | cut -f 2)
+# filtering based on missingness
+bcftools view -S ^<(paste <(bcftools query -f '[%SAMPLE\t]\n' 5.n190_moreSNPS_gwas_thinned.recode.vcf | head -1 | tr '\t' '\n') <(bcftools query -f '[%GT\t]\n' 5.n190_moreSNPS_gwas_thinned.recode.vcf| awk -v OFS="\t" '{for (i=1;i<=NF;i++) if ($i == "./.") sum[i]+=1 } END {for (i in sum) print i, sum[i] / NR }' | sort -k1,1n | cut -f 2) | awk '{ if ($2 > 0.50) print $1 }') 5.n190_moreSNPS_gwas_thinned.recode.vcf| gzip > 5.n190_moreSNPs_gwas_thinned_nomissing.vcf.gz
+# imputing with beagle
+wget https://faculty.washington.edu/browning/beagle/beagle.27Jan18.7e1.jar
+
+module load oracle_java/jdk1.8.0_181
+
+gunzip 5.n190_moreSNPs_gwas_thinned_nomissing.vcf.gz
+
+java -jar beagle.27Jan18.7e1.jar gt=5.n190_moreSNPs_gwas_thinned_nomiss
+plink --make-bed --vcf imputed_thinned_nomissing.vcf.gz --chr-set 95 --a
+awk 'FNR==NR{a[NR]=$1;next}{$6=a[FNR]}1' pheno_bin plink.fam > test.fam
+
+head *.fam
+# then replace our original fam with the test.fam
+
+mv test.fam plink.fam
+
+gemma -gk -bfile plink -p pheno_bin -o kinship
+gemma -bfile plink -k output/kinship.cXX.txt -lmm 4 -o gwas_kinship
+ls output
+# Visualising results
+library(qqman)
+setwd("/scratch/dropathi.m/training_gwas/")
+
+gwas_df<-read.table("/scratch/dropathi.m/training_gwas/output/gwas_kinship.assoc.txt", header = T)
+head(gwas_df)
+hist(gwas_df$p_lrt)
+gwas_df$SNP<-paste("r",1:length(gwas_df$chr), sep="")
+
+gwas_df$pvalue<-pchisq(gwas_df$p_lrt, df=1, lower=F)
+
+padj <- p.adjust(gwas_df$pvalue, method = "BH")
+alpha <- 0.05
+outliers <- which(padj < alpha)
+length(outliers)
+manhattan(gwas_df, chr="chr", bp="ps", p="p_lrt")
+qqnorm(gwas_df$p_score)
